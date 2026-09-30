@@ -48,7 +48,9 @@
     display: grid;
     grid-template-rows: 48px 1fr;
     grid-template-columns: 1fr 400px;
-    height: 100vh;
+    /* leave room for the fixed 36px live ticker so it never covers the
+       player's bottom edge, where the embed's native control bar renders */
+    height: calc(100vh - 36px);
   }
 
   /* ── HEADER ── */
@@ -263,88 +265,15 @@
   }
   #pause-overlay.reconnecting { cursor: default; }
 
-  /* ── VOLUME BLOCK OVERLAY ──────────────────────────────────────────
-     Sits over the embed player's bottom-left corner where their native
-     volume control renders. z-index 6 = above iframe (z-index 2),
-     below stream-bar (z-index 4) and pause-overlay (z-index 3).
-     Width/height tuned to cover a typical player volume area.
-  ─────────────────────────────────────────────────────────────────── */
-  #vol-block {
-    position: absolute;
-    bottom: 0;
-    left: 0;
-    width: 120px;
-    height: 100px;
-    z-index: 6;
-    display: none; /* shown once stream loads */
-  }
-
-  #vol-block.active { display: block; }
-
-  /* Our replacement volume widget rendered inside the block area */
-  #vol-widget {
-    position: absolute;
-    bottom: 10px;
-    left: 10px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    background: rgba(8,11,15,0.82);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 6px 10px;
-    backdrop-filter: blur(4px);
-  }
-
-  #vol-widget-btn {
-    background: none;
-    border: none;
-    color: var(--text);
-    font-size: 14px;
-    cursor: pointer;
-    padding: 0;
-    flex-shrink: 0;
-  }
-
-  #vol-widget-track {
-    display: flex;
-    align-items: center;
-  }
-
-  #vol-widget-slider {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 64px;
-    height: 4px;
-    border-radius: 2px;
-    background: var(--border);
-    outline: none;
-    cursor: pointer;
-  }
-
-  #vol-widget-slider::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    width: 12px; height: 12px;
-    border-radius: 50%;
-    background: var(--accent);
-    cursor: pointer;
-    border: none;
-  }
-
-  #vol-widget-slider::-moz-range-thumb {
-    width: 12px; height: 12px;
-    border-radius: 50%;
-    background: var(--accent);
-    cursor: pointer;
-    border: none;
-  }
   #stream-bar {
     position: absolute;
     top: 0; left: 0; right: 0;
     display: flex;
+    flex-wrap: wrap;       /* many feeds wrap to a 2nd row instead of clipping */
     align-items: center;
     gap: 6px;
-    padding: 10px 14px;
+    /* right padding keeps feed buttons clear of #player-actions (top-right) */
+    padding: 10px 310px 10px 14px;
     background: linear-gradient(rgba(0,0,0,0.85), transparent);
     opacity: 0;
     transition: opacity 0.25s;
@@ -386,10 +315,17 @@
   }
   .stream-bar-msg.error { color: #f87171; }
 
+  /* top-right action row (📺 feeds + Share). Kept off the bottom edge so it
+     never covers the embed's native control bar. */
+  #player-actions {
+    position: absolute;
+    top: 10px; right: 14px;
+    display: flex; align-items: center; gap: 8px;
+    z-index: 5;
+  }
+
   /* share button */
   #share-btn {
-    position: absolute;
-    bottom: 12px; right: 14px;
     display: none;
     align-items: center;
     gap: 6px;
@@ -402,7 +338,6 @@
     font-size: 10px; letter-spacing: 1px;
     cursor: pointer;
     transition: background 0.15s, border-color 0.15s;
-    z-index: 4;
     text-transform: uppercase;
     opacity: 0;
   }
@@ -414,8 +349,6 @@
      (no hover gate) so it's reachable on mobile, where a dead stream would
      otherwise leave the viewer stuck with no way to switch source. */
   #sources-btn {
-    position: absolute;
-    bottom: 12px; left: 14px;
     display: none;
     align-items: center;
     gap: 6px;
@@ -428,7 +361,6 @@
     font-size: 10px; letter-spacing: 1px;
     cursor: pointer;
     transition: background 0.15s, border-color 0.15s;
-    z-index: 5;
     text-transform: uppercase;
   }
   #sources-btn.visible { display: flex; }
@@ -511,7 +443,7 @@
 
   #match-list {
     overflow-y: auto;
-    padding: 12px 12px 56px;
+    padding: 12px;
     display: flex; flex-direction: column; gap: 10px;
   }
   #match-list::-webkit-scrollbar { width: 4px; }
@@ -794,23 +726,14 @@
       <div id="pause-overlay-icon">▶</div>
       <div id="pause-overlay-label">Paused — click to resume</div>
     </div>
-    <!-- Surgical overlay — covers the embed player's native volume control
-         in the bottom-left corner. Blocks user interaction with their UI.
-         Our header slider + postMessage is the only volume interface. -->
-    <div id="vol-block">
-      <div id="vol-widget">
-        <button id="vol-widget-btn" onclick="ctrlMute()" title="Mute / Unmute">🔊</button>
-        <div id="vol-widget-track">
-          <input type="range" id="vol-widget-slider"
-                 min="0" max="100" value="100"
-                 oninput="ctrlVolume(this.value); syncVolSliders(this.value);">
-        </div>
-      </div>
-    </div>
 
     <div id="stream-bar"></div>
-    <button id="sources-btn" onclick="onSourcesBtn()" title="Change stream / source"></button>
-    <button id="share-btn" onclick="shareMatch()">⬆ Share</button>
+    <!-- Our player buttons live top-right, off the bottom edge, so they never
+         sit on the embed's native control bar (play / volume / fullscreen). -->
+    <div id="player-actions">
+      <button id="sources-btn" onclick="onSourcesBtn()" title="Change stream / source"></button>
+      <button id="share-btn" onclick="shareMatch()">⬆ Share</button>
+    </div>
   </section>
 
   <div id="live-ticker">
@@ -1257,7 +1180,6 @@
 
     document.getElementById('player-controls').classList.add('active');
     document.getElementById('share-btn').classList.add('visible');
-    document.getElementById('vol-block').classList.add('active');
     syncVolSliders(100);
 
     // reset the failover nudge for this fresh feed + start health/watchdog tracking
@@ -1914,19 +1836,11 @@
     localStorage.setItem(ACTIVITY_KEY,JSON.stringify(a));
   }
 
-  // Keep both sliders (header + corner widget) in sync
+  // Keep the header volume slider in sync
   function syncVolSliders(val) {
     const v = Number(val);
     const header = document.getElementById('vol-slider');
-    const widget = document.getElementById('vol-widget-slider');
     if (header && header.value !== String(v)) { header.value = v; _fillSlider(v); }
-    if (widget && widget.value !== String(v)) {
-      widget.value = v;
-      widget.style.background =
-        `linear-gradient(to right,var(--accent) ${v}%,var(--border) ${v}%)`;
-    }
-    const btn = document.getElementById('vol-widget-btn');
-    if (btn) btn.textContent = v === 0 ? '🔇' : (v < 50 ? '🔉' : '🔊');
   }
 
   /* ── LIVE CLOCK ── */
