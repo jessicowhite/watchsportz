@@ -453,13 +453,43 @@
 <script>
   const BLOCKED = new Set(['darts','cricket','football','billiards','rugby','afl']);
 
+
+  // ── ppv.st catalog → flat list of canonical matches (Streamed shut down Oct 2026) ──
+  const PPV_API = 'https://api.ppv.st/api/streams';
+  const PPV_SLUG = { 'american football':'american-football', 'ice hockey':'hockey',
+                     'australian football':'afl', '24/7 streams':'24-7',
+                     'motorsport':'motor-sports', 'motor sports':'motor-sports' };
+  const ppvSlug = n => { const k=(n||'other').toLowerCase().trim();
+    return PPV_SLUG[k] || k.replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,''); };
+  function ppvTeams(name) {
+    const p=(name||'').split(/\s+(?:vs\.?|v\.?|@)\s+/i);
+    return p.length===2 ? { home:{name:p[0].trim(),badge:null}, away:{name:p[1].trim(),badge:null} } : null;
+  }
+  async function ppvMatches() {
+    const res = await fetch(PPV_API);
+    if (!res.ok) throw new Error(`${res.status}`);
+    const body = await res.json();
+    const out = [];
+    for (const c of (body.streams || [])) for (const s of (c.streams || [])) {
+      const always = !!s.always_live;
+      out.push({ id:`ppv-${s.id}`, title:s.name, category:ppvSlug(s.category_name),
+        date: always || !s.starts_at ? Date.now() : s.starts_at*1000,
+        endsAt: !always && s.ends_at>0 ? s.ends_at*1000 : null, alwaysLive: always,
+        popular: Number(s.viewers) >= 100, teams: ppvTeams(s.name) });
+    }
+    return out;
+  }
+  const ppvLive  = m => m.alwaysLive || (Date.now()>=m.date && Date.now()<=(m.endsAt || m.date+3.5*3600000));
+  const ppvEnded = m => !m.alwaysLive && (m.endsAt || m.date+3.5*3600000) < Date.now();
+
   async function loadGames() {
     const grid = document.getElementById('games-grid');
     try {
-      const res  = await fetch('https://streamed.st/api/matches/all-today');
-      if (!res.ok) throw new Error();
-      const all  = await res.json();
+      const today = new Date().toDateString();
+      const all  = await ppvMatches();
       const data = all
+        .filter(m => !m.alwaysLive && !ppvEnded(m) &&
+                     (ppvLive(m) || new Date(m.date).toDateString() === today))
         .filter(m => !BLOCKED.has((m.category||'').toLowerCase()))
         .sort((a, b) => (b.popular - a.popular) || (a.date - b.date))
         .slice(0, 12);

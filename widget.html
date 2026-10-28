@@ -271,8 +271,35 @@
 </div>
 
 <script>
-  const HOST        = 'https://streamed.st';
-  const API         = HOST + '/api';
+  const HOST        = 'https://api.ppv.st';
+
+  // ── ppv.st catalog → flat list of canonical matches (Streamed shut down Oct 2026) ──
+  const PPV_API = 'https://api.ppv.st/api/streams';
+  const PPV_SLUG = { 'american football':'american-football', 'ice hockey':'hockey',
+                     'australian football':'afl', '24/7 streams':'24-7',
+                     'motorsport':'motor-sports', 'motor sports':'motor-sports' };
+  const ppvSlug = n => { const k=(n||'other').toLowerCase().trim();
+    return PPV_SLUG[k] || k.replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,''); };
+  function ppvTeams(name) {
+    const p=(name||'').split(/\s+(?:vs\.?|v\.?|@)\s+/i);
+    return p.length===2 ? { home:{name:p[0].trim(),badge:null}, away:{name:p[1].trim(),badge:null} } : null;
+  }
+  async function ppvMatches() {
+    const res = await fetch(PPV_API);
+    if (!res.ok) throw new Error(`${res.status}`);
+    const body = await res.json();
+    const out = [];
+    for (const c of (body.streams || [])) for (const s of (c.streams || [])) {
+      const always = !!s.always_live;
+      out.push({ id:`ppv-${s.id}`, title:s.name, category:ppvSlug(s.category_name),
+        date: always || !s.starts_at ? Date.now() : s.starts_at*1000,
+        endsAt: !always && s.ends_at>0 ? s.ends_at*1000 : null, alwaysLive: always,
+        popular: Number(s.viewers) >= 100, teams: ppvTeams(s.name) });
+    }
+    return out;
+  }
+  const ppvLive  = m => m.alwaysLive || (Date.now()>=m.date && Date.now()<=(m.endsAt || m.date+3.5*3600000));
+  const ppvEnded = m => !m.alwaysLive && (m.endsAt || m.date+3.5*3600000) < Date.now();
   const ESPN        = 'https://a.espncdn.com/i/teamlogos';
   const BLOCKED     = new Set(['darts','cricket','football','billiards','rugby','afl']);
   const SPORT_EMOJI = {
@@ -388,7 +415,7 @@
     const away    = match.teams?.away;
     const cat     = (match.category || 'other').toLowerCase();
     const emoji   = SPORT_EMOJI[cat] || SPORT_EMOJI.other;
-    const isNow   = Date.now() >= match.date && Date.now() <= match.date + 3.5 * 3600000;
+    const isNow   = ppvLive(match);
 
     const homeLabel = home?.name || match.title;
     const awayLabel = away?.name || '';
@@ -414,10 +441,10 @@
 
   async function load() {
     try {
-      const res  = await fetch(`${API}/matches/live`);
-      if (!res.ok) throw new Error(`${res.status}`);
-      const all  = await res.json();
-      const data = all.filter(m => !BLOCKED.has((m.category||'').toLowerCase()));
+      const live = (await ppvMatches()).filter(m => ppvLive(m) && !BLOCKED.has((m.category||'').toLowerCase()));
+      // prefer real games; fall back to 24/7 channels when nothing is on
+      const games = live.filter(m => !m.alwaysLive);
+      const data = games.length ? games : live;
 
       if (!data.length) {
         document.getElementById('status').innerHTML = 'No live games right now';
