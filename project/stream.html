@@ -10,8 +10,8 @@
      overlaps DNS + TLS handshake with page parse instead of paying that
      latency cost at fetch-time or at first stream click. -->
 <link rel="preconnect" href="https://a.espncdn.com">
-<link rel="preconnect" href="https://embed.st">
-<link rel="preconnect" href="https://streamed.st">
+<link rel="preconnect" href="https://api.ppv.st" crossorigin>
+<link rel="preconnect" href="https://taifood-blog.asia">
 <!-- Fonts loaded non-render-blocking: preload the stylesheet, swap it in
      once fetched, so the page shell (header/sidebar) paints immediately
      instead of waiting on the Google Fonts round trip. -->
@@ -791,18 +791,15 @@
     }, {capture:true});
   })();
 
-  /* ── API — single canonical source, with retry ────────────────
-     streamed.st is the sole data source: the surviving official
-     mirror of the streamed.* API. One host serves the live/today/all
-     match lists, per-source stream lookups, the sports list, and
-     team-badge images — everything the app needs — with permissive
-     CORS (access-control-allow-origin: *), so this static site can
-     call it straight from the browser. 502/503/504 are treated as
-     transient and retried before an error is surfaced.
-     (streamed.pk, the previous host, is dead; see the operators' own
-     status page at strmd.link which lists streamed.st as Online.)
+  /* ── API — single source, with retry ───────────────────────────
+     ppv.st (api.ppv.st) is the data source. Streamed (streamed.st/.pk)
+     shut down in Oct 2026 — its closure notice recommended ppv.st first.
+     One call (/api/streams) returns every category and stream with its
+     embed URL(s) already attached, under permissive CORS
+     (access-control-allow-origin: *), so this static site calls it
+     straight from the browser. 502/503/504 are retried as transient.
   ──────────────────────────────────────────────────────────────── */
-  const API_HOST = 'https://streamed.st';
+  const API_HOST = 'https://api.ppv.st';
 
   async function apiFetch(path, retries = 2, onRetry = null) {
     let lastErr;
@@ -829,10 +826,82 @@
     throw lastErr || new Error('Request failed after retries');
   }
 
-  // Legacy compatibility for any `${API}/...` string concatenation
-  const API = `${API_HOST}/api`;
-
   const BLOCKED_CATS = new Set(['darts','cricket','football','billiards','rugby','afl']);
+
+  /* ── PPV ADAPTER ────────────────────────────────────────────────
+     Normalises a ppv.st stream into the app's canonical match shape:
+       { id, title, category, categoryName, date, endsAt, alwaysLive,
+         popular, teams, _provider, _directStreams[] }
+     Category names map onto the slugs the rest of the app already keys
+     on (ESPN logos/scores, BLOCKED_CATS, sport emoji). */
+  const PPV_CAT_SLUG = {
+    'american football':'american-football', 'ice hockey':'hockey',
+    'australian football':'afl', '24/7 streams':'24-7',
+    'motorsport':'motor-sports', 'motor sports':'motor-sports',
+  };
+  function ppvSlug(name) {
+    const k = (name || 'other').toLowerCase().trim();
+    return PPV_CAT_SLUG[k] || k.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  }
+  // "Team A vs. Team B" → {home, away}; anything else → null (title-only card)
+  function parseTeams(name) {
+    const p = (name || '').split(/\s+(?:vs\.?|v\.?|@)\s+/i);
+    return p.length === 2
+      ? { home: { name: p[0].trim(), badge: null }, away: { name: p[1].trim(), badge: null } }
+      : null;
+  }
+  function adaptPpv(s) {
+    const alwaysLive = !!s.always_live;
+    // main feed + alternates; the label shows in the feed switcher
+    const feeds = [{ embedUrl: s.iframe, language: s.source_tag || s.tag || 'Main',
+                     source: 'main', streamNo: 1, hd: true }];
+    (s.substreams || []).forEach((x, i) => {
+      if (x && x.iframe) feeds.push({ embedUrl: x.iframe, language: x.source_tag || x.tag || `Alt ${i + 1}`,
+                                      source: 'alt', streamNo: i + 2, hd: true });
+    });
+    return {
+      id: `ppv-${s.id}`,
+      title: s.name,
+      category: ppvSlug(s.category_name),
+      categoryName: s.category_name || 'Other',
+      // 24/7 channels carry junk start times — treat them as "now"
+      date: alwaysLive || !s.starts_at ? Date.now() : s.starts_at * 1000,
+      endsAt: !alwaysLive && s.ends_at > 0 ? s.ends_at * 1000 : null,
+      alwaysLive,
+      popular: Number(s.viewers) >= 100,
+      viewers: Number(s.viewers) || 0,
+      teams: parseTeams(s.name),
+      _provider: 'ppv',
+      _directStreams: feeds,
+    };
+  }
+
+  /* One fetch feeds every tab, the sport list, the ticker and deep links.
+     Cached 60s; concurrent callers share the in-flight request. */
+  const CATALOG_TTL = 60 * 1000;
+  let _catalog = null, _catalogInFlight = null;
+  async function loadCatalog(force = false, onRetry = null) {
+    if (!force && _catalog && Date.now() - _catalog.ts < CATALOG_TTL) return _catalog;
+    if (_catalogInFlight) return _catalogInFlight;
+    _catalogInFlight = (async () => {
+      const res = await apiFetch('/streams', 2, onRetry);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = await res.json();
+      if (!body || !Array.isArray(body.streams)) throw new Error('Unexpected response');
+      const matches = [], cats = new Map();
+      for (const c of body.streams) {
+        for (const s of (c.streams || [])) {
+          if (!s || !s.iframe) continue;
+          const m = adaptPpv(s);
+          matches.push(m);
+          if (!cats.has(m.category)) cats.set(m.category, m.categoryName);
+        }
+      }
+      _catalog = { matches, categories: [...cats].map(([id, name]) => ({ id, name })), ts: Date.now() };
+      return _catalog;
+    })();
+    try { return await _catalogInFlight; } finally { _catalogInFlight = null; }
+  }
 
   /* ── STREAM EMBED URL ──────────────────────────────────────────
      Streams embed straight from the source host. A local Node proxy
@@ -883,16 +952,16 @@
     if (d.toDateString()===m.toDateString()) return 'Tomorrow';
     return d.toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'});
   }
+  // ppv gives real start/end times; 24/7 channels are always live. When an
+  // end time is missing, fall back to the start + LIVE_WINDOW_MS heuristic.
+  const matchEnd = m => m.endsAt || (m.date + LIVE_WINDOW_MS);
   function isLive(m) {
-    // Matches from the /matches/live endpoint are flagged _live=true and are
-    // authoritatively live (a long baseball game is still live at 4h). Others
-    // fall back to a start-time + window heuristic for the LIVE badge.
-    if (m._live) return true;
-    const n=Date.now(); return n>=m.date && n<=m.date+LIVE_WINDOW_MS;
+    if (m.alwaysLive) return true;
+    const n=Date.now(); return n>=m.date && n<=matchEnd(m);
   }
   function hasEnded(m) {
-    if (m._live) return false;               // endpoint says it's live
-    return m.date + LIVE_WINDOW_MS < Date.now();
+    if (m.alwaysLive) return false;
+    return matchEnd(m) < Date.now();
   }
   function getDisplayTitle(m) {
     const h=m.teams?.home?.name, a=m.teams?.away?.name;
@@ -982,8 +1051,9 @@
     return null;
   }
 
-  // Resolve a badge value into a real image URL. streamed.st gives one of:
-  //   • an absolute URL (…streamed.st/api/images/badge/<id>.webp) → use as-is
+  // Resolve a badge value into a real image URL. ppv supplies no team badges
+  // (cards use ESPN logos, else a placeholder); kept for providers that send:
+  //   • an absolute URL → use as-is
   //   • a root-relative path (/api/images/…)                      → prefix host
   //   • an opaque badge id ("GwZg7AZ…")                           → build the URL
   function badgeUrl(ss) {
@@ -1211,16 +1281,14 @@
      failover. Static-site-safe: health is learned per-browser in
      localStorage. Adding a provider later = one entry in PROVIDERS. ══ */
 
-  // Provider registry. Only streamed.st is live today, but routing matches
-  // through here makes a new/replacement provider a config change, not a code
-  // change (streamed.pk→streamed.st was a manual one-liner; this generalises
-  // it). adapt() would normalise a provider's match into the canonical shape;
-  // streamed.st is already canonical, so identity.
+  // Provider registry. ppv.st is the live provider (Streamed shut down Oct
+  // 2026). adapt() normalises a provider's item into the canonical match
+  // shape; matches carry either _directStreams (embeds attached, like ppv) or
+  // sources[] needing a per-source /stream lookup (the old streamed.* shape) —
+  // resolveMatchFeeds handles both, so a replacement provider is an entry here.
   const PROVIDERS = [
-    { id:'streamed-st', name:'Streamed', base: API_HOST, primary:true,
-      endpoints:{ sports:'/sports', live:'/matches/live', today:'/matches/all-today',
-                  all:'/matches/all', stream:(s,i)=>`/stream/${s}/${i}` },
-      adapt:(m)=>m },
+    { id:'ppv', name:'PPV', base: API_HOST, primary:true,
+      endpoints:{ catalog:'/streams' }, adapt: adaptPpv },
   ];
   const PROVIDER_ID = PROVIDERS[0].id;
   const feedSig = (provider, source) => `${provider||PROVIDER_ID}/${source||'?'}`;
@@ -1434,21 +1502,16 @@
   async function handleDeepLink() {
     const id=new URLSearchParams(window.location.search).get('match');
     if (!id) return;
-    for (const ep of ['/matches/live', '/matches/all-today', '/matches/all']) {
-      try {
-        const res = await apiFetch(ep); if (!res.ok) continue;
-        const data = await res.json();
-        const found = data.find(m => m.id === id);
-        if (found) {
-          setTimeout(()=>{
-            const card=document.querySelector(`.match-card[data-id="${id}"]`);
-            if(card){card.scrollIntoView({behavior:'smooth',block:'center'});card.click();}
-            else selectMatch(found,{classList:{add:()=>{},remove:()=>{}},dataset:{id}});
-          },1200);
-          break;
-        }
-      } catch(_){}
-    }
+    try {
+      const found = (await loadCatalog()).matches.find(m => m.id === id);
+      if (found) {
+        setTimeout(()=>{
+          const card=document.querySelector(`.match-card[data-id="${id}"]`);
+          if(card){card.scrollIntoView({behavior:'smooth',block:'center'});card.click();}
+          else selectMatch(found,{classList:{add:()=>{},remove:()=>{}},dataset:{id}});
+        },1200);
+      }
+    } catch(_){}
   }
 
   /* ── MODE / SPORT TABS ── */
@@ -1460,17 +1523,15 @@
     document.querySelectorAll('.sport-tab').forEach(b=>b.classList.remove('active'));
     document.querySelector('.sport-tab[data-sport="all"]').classList.add('active');
 
-    // Each tab maps to its own streamed.st endpoint, so switching tabs
-    // fetches that mode. fetchAndRender serves from a short per-mode
-    // cache when it can, so rapid tab-flipping doesn't spam the API.
+    // All tabs filter the same cached catalog, so switching is instant;
+    // fetchAndRender only re-hits the API once the 60s cache is stale.
     fetchAndRender();
   });
 
   async function loadSports() {
     try {
-      const res = await apiFetch('/sports'); if (!res.ok) return;
-      const data = await res.json();
-      data.filter(s=>!BLOCKED_CATS.has(s.id?.toLowerCase())).forEach(s=>{
+      const { categories } = await loadCatalog();
+      categories.filter(s=>!BLOCKED_CATS.has(s.id?.toLowerCase())).forEach(s=>{
         const btn=document.createElement('button');
         btn.className='sport-tab'; btn.dataset.sport=s.id; btn.textContent=s.name;
         $sportTabs.appendChild(btn);
@@ -1487,54 +1548,23 @@
   });
 
   /* ── FETCH ── */
-  function endpointForMode(mode) {
-    if (mode==='live')  return '/matches/live';
-    if (mode==='today') return '/matches/all-today';
-    return '/matches/all';
-  }
-
-  /* Short per-mode cache so flipping between Live/Today/Upcoming doesn't
-     refetch a mode that was just loaded. Keyed by mode → { matches, ts }. */
-  const _modeCache = {};
   let _autoRetryTimer;
-  const FETCH_STALE_MS = 60 * 1000; // reuse a mode's matches for up to 60s
 
   async function fetchAndRender(force = false) {
-    const mode = currentMode;
-    const cached = _modeCache[mode];
-    if (!force && cached && Date.now() - cached.ts < FETCH_STALE_MS) {
-      allMatches = cached.matches;
-      renderMatches();
-      return;
+    const fresh = !force && _catalog && Date.now() - _catalog.ts < CATALOG_TTL;
+    if (!fresh) {
+      $matchList.innerHTML='<div class="state-msg"><div class="spinner"></div><br>Loading…</div>';
+      activeCard=null;
     }
-
-    $matchList.innerHTML='<div class="state-msg"><div class="spinner"></div><br>Loading…</div>';
-    activeCard=null;
     try {
-      const res = await apiFetch(endpointForMode(mode), 2, (attempt, total, reason) => {
+      const { matches } = await loadCatalog(force, (attempt, total, reason) => {
         $matchList.innerHTML = `
           <div class="state-msg">
             <div class="spinner"></div><br>
             Reconnecting… (${attempt}/${total} · ${reason})
           </div>`;
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      if (!Array.isArray(data)) throw new Error('Unexpected response');
-
-      // The live endpoint is authoritative that its matches are live —
-      // tag them so isLive()/hasEnded() don't second-guess by the clock.
-      if (mode === 'live') data.forEach(m => { m._live = true; });
-
-      _modeCache[mode] = { matches: data, ts: Date.now() };
-      // A slow request can resolve after the user already switched tabs —
-      // only paint if this is still the active mode.
-      if (currentMode !== mode) return;
-      allMatches = data;
-      if (!data.length) {
-        $matchList.innerHTML = '<div class="state-msg">No matches on this tab right now.</div>';
-        return;
-      }
+      allMatches = matches;
       renderMatches();
     } catch(e) {
       $matchList.innerHTML = `
@@ -1554,9 +1584,18 @@
   function renderMatches() {
     let data=allMatches.filter(m=>!BLOCKED_CATS.has(m.category?.toLowerCase()));
 
-    // Mode (Live / Today / Upcoming) is filtered server-side by the
-    // per-mode endpoint in endpointForMode(), so there's no client-side
-    // date/live filter here — only the sport filter below.
+    // One catalog, filtered per tab:
+    //   Live     → on right now (incl. 24/7 channels)
+    //   Today    → live now, or starting today and not yet over
+    //   Upcoming → anything not over yet
+    const todayStr = new Date().toDateString();
+    if (currentMode === 'live') {
+      data = data.filter(isLive);
+    } else if (currentMode === 'today') {
+      data = data.filter(m => isLive(m) || (!hasEnded(m) && new Date(m.date).toDateString() === todayStr));
+    } else {
+      data = data.filter(m => !hasEnded(m));
+    }
     if (currentSport!=='all') data=data.filter(m=>m.category===currentSport);
     if (!data.length){$matchList.innerHTML='<div class="state-msg">No matches found.</div>';return;}
     data=[...data].sort((a,b)=>(b.popular-a.popular)||(a.date-b.date));
@@ -1618,12 +1657,12 @@
         <span class="away-name"></span>
         ${badgeImg(away.badge, away.name, match.category)}
         ${statusTag}
-        <span class="card-time">${fmtTime(match.date)}</span>
+        <span class="card-time">${match.alwaysLive ? '24/7' : fmtTime(match.date)}</span>
       `;
       card.querySelector('.home-name').textContent = home.name;
       card.querySelector('.away-name').textContent = away.name;
     } else {
-      card.innerHTML = `<span class="card-time">${fmtTime(match.date)}</span>`;
+      card.innerHTML = `<span class="card-time">${match.alwaysLive ? '24/7' : fmtTime(match.date)}</span>`;
       const titleEl = document.createElement('span');
       titleEl.className   = 'card-title';
       titleEl.textContent = match.title || '';
@@ -1659,6 +1698,10 @@
   // (may be empty). Shared by the click path and the background pre-warmer, so
   // a source that won't resolve (like `echo`) sinks and stops being picked.
   async function resolveMatchFeeds(match) {
+    // Providers that ship embeds inline (ppv): no lookup, just health-order them.
+    if (match._directStreams?.length) {
+      return orderFeeds(match._directStreams.map(f => ({ ...f, _source: f.source, _sig: feedSig(match._provider, f.source) })));
+    }
     if (!match.sources?.length) return [];
     const rankedSources = FeedHealth.rank(match.sources, s => feedSig(match._provider, s.source));
     const perSource = await Promise.all(rankedSources.map(async src => {
@@ -1685,8 +1728,9 @@
   const RESOLVE_TTL = 60000;
   const _prewarmInFlight = new Set();
   const _freshCache = id => { const c=_resolveCache.get(id); return (c && Date.now()-c.ts < RESOLVE_TTL) ? c : null; };
+  const hasFeeds = m => !!(m?._directStreams?.length || m?.sources?.length);
   async function prewarmMatch(match){
-    if (!match?.sources?.length || _freshCache(match.id) || _prewarmInFlight.has(match.id)) return;
+    if (!hasFeeds(match) || _freshCache(match.id) || _prewarmInFlight.has(match.id)) return;
     _prewarmInFlight.add(match.id);
     try { _resolveCache.set(match.id, { streams: await resolveMatchFeeds(match), ts: Date.now() }); }
     catch(_){}
@@ -1710,7 +1754,7 @@
     $streamBar.innerHTML  = '<span class="stream-bar-msg">LOADING STREAMS…</span>';
     track('stream_click', { title: getDisplayTitle(match), cat: match.category });
 
-    if (!match.sources?.length) {
+    if (!hasFeeds(match)) {
       showStreamError(getDisplayTitle(match), 'No stream listed for this match yet');
       return;
     }
@@ -1732,7 +1776,7 @@
   }
 
   /* ── LIVE TICKER ── */
-  const SPORT_EMOJI={basketball:'🏀',baseball:'⚾',hockey:'🏒','american-football':'🏈',tennis:'🎾',golf:'⛳','motor-sports':'🏎️',boxing:'🥊',mma:'🥋'};
+  const SPORT_EMOJI={basketball:'🏀',baseball:'⚾',hockey:'🏒','american-football':'🏈',tennis:'🎾',golf:'⛳','motor-sports':'🏎️',boxing:'🥊',mma:'🥋',wrestling:'🤼','24-7':'📺'};
 
   function tickerBadge(name,src,cat) {
     const logo=getTeamLogo(name,cat)||badgeUrl(src);
@@ -1793,7 +1837,7 @@
     const home=match.teams?.home, away=match.teams?.away;
     const cat=(match.category||'').toLowerCase();
     const emoji=SPORT_EMOJI[cat]||'🏅';
-    const nowLive = Date.now() >= match.date && Date.now() <= match.date + LIVE_WINDOW_MS;
+    const nowLive = isLive(match);
     const hBadge=home?tickerBadge(home.name,home.badge,cat):`<span style="font-size:13px">${emoji}</span>`;
     const aBadge=away?tickerBadge(away.name,away.badge,cat):'';
     const homeN=home?.name||match.title, awayN=away?.name||'';
@@ -1805,9 +1849,11 @@
 
   async function loadTicker() {
     try {
-      const res = await apiFetch('/matches/live'); if (!res.ok) return;
-      const all=await res.json(); if(!Array.isArray(all)||!all.length) return;
-      const data=all.filter(m=>!BLOCKED_CATS.has((m.category||'').toLowerCase()))
+      const { matches } = await loadCatalog();
+      const visible = matches.filter(m=>isLive(m) && !BLOCKED_CATS.has((m.category||'').toLowerCase()));
+      // prefer real games; fall back to 24/7 channels when nothing is on
+      const games = visible.filter(m=>!m.alwaysLive);
+      const data=(games.length ? games : visible)
                     .sort((a,b)=>(b.popular-a.popular)||(a.date-b.date));
       if(!data.length) return;
       const scores=await Promise.all(data.map(m=>getLiveScore(m)));
