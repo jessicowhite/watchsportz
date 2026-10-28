@@ -16,12 +16,17 @@ Live sports streaming web app. Open this folder in Claude Code to continue work.
 ## Live deployment
 - Cloudflare Pages: **watchsportz.pages.dev** (static file drop, no server)
 
-## Data source (updated 2026-08-15)
-**Single source: `https://streamed.st`** — the surviving official mirror of the streamed.* API.
-- Endpoints used: `/api/sports`, `/api/matches/{live,all-today,all}`, `/api/stream/{source}/{id}`, `/api/images/badge|proxy/*.webp`
-- CORS `*`, so the static site calls it directly from the browser.
-- Per-mode fetch (Live/Today/Upcoming hit different endpoints) with a 60s cache.
-- Previous sources are dead: `streamed.pk` (offline), `ws.kora-api.space` (Kora — served a stale, no-live feed).
+## Data source (updated 2026-10-27)
+**Single source: `https://api.ppv.st/api/streams`** (ppv.st).
+- Streamed (streamed.st / .pk) **shut down in Oct 2026** — every streamed.* host now redirects to a
+  closure notice that recommends ppv.st first.
+- One call returns every category and stream with its embed URL(s) attached (main + alternates);
+  CORS `*`, so the static site calls it directly. Cached 60s and shared by every tab, the sport list,
+  the ticker and deep links; tabs filter locally (live = started and not ended, or a 24/7 channel).
+- Embeds come from `taifood-blog.asia` (iframe-friendly, no sandbox gate). The first click on a
+  player usually opens an ad tab; close it and click ▶ again.
+- ppv's API notes "Interested in using our API? Contact us" — open today, could be rate-limited later.
+- Swapping providers = an adapter + an entry in `PROVIDERS` in stream.html.
 
 ## Streams / player
 - All streams embed from `embed.st` (only provider; every source type funnels there).
@@ -64,8 +69,8 @@ experience immediately. It's a Cloudflare Pages Function + KV, already written a
 4. Verify `watchsportz.pages.dev/stream.html` loads live matches and a match plays.
 
 ## Deploy (GitHub Pages) — free static hosting  ✅ LIVE
-Deployed at **https://roncharles13-cloud.github.io/watchsportz/** (repo:
-`roncharles13-cloud/watchsportz`, public). Pages serves the **`gh-pages` branch** (which is
+Deployed at **https://jessicowhite.github.io/watchsportz/** (repo:
+`jessicowhite/watchsportz`, public). Pages serves the **`gh-pages` branch** (which is
 the `project/` folder at its root — built with `git subtree`), so all internal links are
 relative and resolve under the `/watchsportz/` subpath.
 
